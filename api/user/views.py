@@ -1,92 +1,59 @@
 from rest_framework import viewsets
-from rest_framework.permissions import AllowAny
-from .serializers import UserSerializer
+from rest_framework.authtoken.models import Token
+from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from django.contrib.auth import logout
+
 from .models import CustomUser
-from django.http import JsonResponse
-from django.contrib.auth import get_user_model
-from django.views.decorators.csrf import csrf_exempt
-from django.contrib.auth import login, logout
-import re
-
-import random
+from .serializers import EmailAuthTokenSerializer, UserSerializer
 
 
-# Create your views here.
+class EmailAuthTokenView(ObtainAuthToken):
+    permission_classes = [AllowAny]
+    serializer_class = EmailAuthTokenSerializer
 
-def generate_sessoin_token(length=10):
-    return ''.join(random.SystemRandom().choice([chr(i) for i in range(97, 123)] + [str(i) for i in range(10)]) for _ in range(length))  #'1lh24gfph7'
+    def post(self, request, *args, **kwargs):  # type: ignore[override]
+        serializer = self.serializer_class(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user"]
+        token, _ = Token.objects.get_or_create(user=user)
+        user_data = UserSerializer(user, context={"request": request}).data
+        return Response({"token": token.key, "user": user_data})
 
-@csrf_exempt
-def signin(request):
-    if not request.method == 'POST':
-        return JsonResponse({'error': 'Send a post request with valid parameters only'})
-    
-    username = request.POST['email'] # extract from the database
-    password = request.POST['password']
 
-    if not re.match("^[a-zA-Z0-9_\\.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-\\.]+$", username):
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
 
-        return JsonResponse({'errro': 'Enter a valid email'})
-    
-    if len(password) < 3:
-        return JsonResponse({'error': 'password contains atleaset 3 characters'})
-    
-    UserModel = get_user_model()
-
-    try:
-        user = UserModel.objects.get(email=username)
-
-        if user.check_password(password):
-            usr_dict = UserModel.objects.filter(email=username).values().first()
-            usr_dict.pop('password')
-
-            if user.session_token != '0':
-                user.session_token = '0'
-                user.save()
-                return JsonResponse({'error': 'previous session exists'})
-            
-            token = generate_sessoin_token()
-            user.session_token = token
-            user.save()
-            login(request, user)
-            return JsonResponse({'token': token, 'user': usr_dict})
-        
+    def post(self, request, *args, **kwargs):  # type: ignore[override]
+        token = getattr(request, "auth", None)
+        if token:
+            token.delete()
         else:
-            return JsonResponse({'error': 'Invalid password'})
-            
-
-
-    except UserModel.DoesNotExist:
-        return JsonResponse({'error': 'Invalid email'})
-    
-
-
-def signout(request, id):
-    logout(request)
-
-    UserModel = get_user_model()
-
-    try:
-        user = UserModel.objects.get(pk=id)
-        user.session_token = '0'
-        user.save()
-    except UserModel.DoesNotExist:
-        return JsonResponse({'error': 'Invalid user ID '})
-    
-    return JsonResponse({'success': 'Logout success'})
-
+            Token.objects.filter(user=request.user).delete()
+        logout(request)
+        return Response({"success": "Logout success"})
 
 
 class UserViewSet(viewsets.ModelViewSet):
-    permission_classes_by_action = {'create': [AllowAny]}
-
-    queryset = CustomUser.objects.all().order_by('id')
-
+    permission_classes_by_action = {"create": [AllowAny]}
+    queryset = CustomUser.objects.all().order_by("id")
     serializer_class = UserSerializer
 
-    def get_permissions(self):
+    def get_permissions(self):  # type: ignore[override]
         try:
             return [permission() for permission in self.permission_classes_by_action[self.action]]
         except KeyError:
             return [permission() for permission in self.permission_classes]
-        
+
+
+def signin(request):  # pragma: no cover - legacy alias
+    view = EmailAuthTokenView.as_view()
+    return view(request)
+
+
+def signout(request, *args, **kwargs):  # pragma: no cover - legacy alias
+    view = LogoutView.as_view()
+    return view(request, *args, **kwargs)
